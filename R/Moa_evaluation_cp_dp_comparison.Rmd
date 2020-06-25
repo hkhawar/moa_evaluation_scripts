@@ -1,0 +1,223 @@
+---
+title: "test_moa"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# 
+# url <- "https://cran.r-project.org/src/contrib/Archive/dplyr/dplyr_0.7.4.tar.gz"
+# pkgFile <- "dplyr_0.7.4.tar.gz"
+# download.file(url = url, destfile = pkgFile)
+# 
+# # Install dependencies
+# install.packages(c("heatmap.plus"))
+# 
+# # Install package
+# install.packages(pkgs=pkgFile, type="source", repos=NULL)
+
+
+library(dplyr)
+library("SNFtool")
+
+```
+
+
+```{r setup, include=FALSE}
+setwd('/Users/habbasi/Desktop/TA/code/')
+```
+
+```{r pressure, echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(magrittr)
+
+fname <- "correlation_matrix_EfficientNet.csv"
+dp.melt.median <- readr::read_csv(fname) %>%
+  select(-X1)
+
+
+enrichment.based.classification <- FALSE
+k.snf <- 7     # neighborhood size in SNF
+t <- 10
+k <- 1:10      # k top hits are used for classification
+genetic <- T
+not.same.batch <- F
+snf.med.mad <- T
+
+if (genetic) {
+  not.same.batch <- F
+}
+
+cr.melt.median <- readRDS("cr_median.rds")
+
+
+cr.melt.median$Metadata_moa.x <- str_to_lower(cr.melt.median$Metadata_moa.x)
+cr.melt.median$Metadata_moa.y <- str_to_lower(cr.melt.median$Metadata_moa.y)
+dp.melt.median$Metadata_moa.x <- str_to_lower(dp.melt.median$Metadata_moa.x)
+dp.melt.median$Metadata_moa.y <- str_to_lower(dp.melt.median$Metadata_moa.y)
+
+
+cr.median <- cr.melt.median %>%
+  select(Var1, Var2, value) %>%
+  group_by(Var1, Var2) %>%
+  summarise(value = max(value)) %>%
+  reshape2::acast("Var1 ~ Var2")
+
+dp.median <- dp.melt.median %>%
+  select(Var1, Var2, value) %>%
+  group_by(Var1, Var2) %>%
+  summarise(value = max(value)) %>%
+  reshape2::acast("Var1 ~ Var2")
+
+
+
+sim_normalize <- function(sim_mat) {
+  sm <- sim_mat[upper.tri(sim_mat)]
+  sim_mat <- (sim_mat - median(sm))/mad(sm)
+  sim_mat <- sim_mat/quantile(sim_mat, 0.999) * 0.999
+  sim_mat[(sim_mat > 1)] <- 1
+  sim_mat[(sim_mat < -1)] <- -1
+  diag(sim_mat) <- 1
+  return(sim_mat)
+}
+
+
+
+perpare_sm <- function(sm, metadata) {
+  sm <- sm %>%
+    reshape2::melt() %>%
+    filter(as.character(Var1) < as.character(Var2) &
+             Var1 != "DMSO" &
+             Var2 != "DMSO") %>%
+    left_join(.,
+              metadata,
+              by = c("Var1" = "Metadata_broad_sample")) %>%
+    left_join(.,
+              metadata,
+              by = c("Var2" = "Metadata_broad_sample")) %>%
+    filter(!is.na(Metadata_moa.x) & !is.na(Metadata_moa.y) & Metadata_moa.x != "" & Metadata_moa.y != "") %>%
+    mutate(same.moa = same.moa(Metadata_moa.x, Metadata_moa.y))
+  return(sm)
+}
+
+same.moa <- function(moa.list.1, moa.list.2) {
+  if (is.na(moa.list.1) || is.na(moa.list.2) || moa.list.1 == "" || moa.list.2 == "")
+    return(FALSE)
+  moa.list.1 <- str_to_lower(moa.list.1)
+  moa.list.2 <- str_to_lower(moa.list.2)
+
+  moas.1 <- str_split(moa.list.1, "\\|")[[1]]
+  moas.2 <- str_split(moa.list.2, "\\|")[[1]]
+  return(any(moas.1 %in% moas.2) | any(moas.2 %in% moas.1))
+}
+
+same.moa <- Vectorize(same.moa)
+
+enrichment_top_conn <- function(sm, metadata, top.perc = 0.95, not.same.batch = F) {
+  if (not.same.batch) {
+    sm <- sm 
+    #%>%
+      # filter((is.na(Metadata_Plate_Map_Name.x) & !is.na(Metadata_Plate_Map_Name.y))
+      #        | (is.na(Metadata_Plate_Map_Name.y) & !is.na(Metadata_Plate_Map_Name.x))
+      #        | (Metadata_Plate_Map_Name.x != Metadata_Plate_Map_Name.y))
+  }
+
+  thr <- quantile(sm$value, top.perc, na.rm = T)
+
+  v11 <- sm %>%
+    filter(value > thr & same.moa) %>%
+    NROW
+
+  v12 <- sm %>%
+    filter(value > thr & !same.moa) %>%
+    NROW
+
+  v21 <- sm %>%
+    filter(value < thr & same.moa) %>%
+    NROW
+
+  v22 <- sm %>%
+    filter(value < thr & !same.moa) %>%
+    NROW
+
+  return(fisher.test(x = rbind(c(v11, v12), c(v21, v22)),
+                     alternative = "greater"))
+}
+
+
+cr.median <- sim_normalize(cr.median) 
+dp.median <- sim_normalize(dp.median) 
+
+
+
+d <- apply(cr.median, 1, function(x) !(sum(is.na(x)) >= (NROW(cr.mean) -1 )))
+cr.median <- cr.median[d, d]
+
+d <- apply(dp.median, 1, function(x) !(sum(is.na(x)) >= (NROW(cr.mean) -1 )))
+dp.median <- dp.median[d, d]
+ 
+cr.median[is.na(cr.median)] <- 0
+dp.median[is.na(dp.median)] <- 0
+
+metadata_cr.melt.median <- cr.melt.median %>%
+  select(Var1, Metadata_moa.x) %>%
+  unique() %>%
+  mutate(Metadata_broad_sample = Var1, Metadata_moa = Metadata_moa.x) %>%
+  select(-Var1, -Metadata_moa.x)
+
+metadata_cp <- metadata_cr.melt.median %>% mutate(Metadata_moa = str_to_lower(Metadata_moa))
+
+metadata_dp.melt.median <- dp.melt.median %>%
+  select(Var1, Metadata_moa.x) %>%
+  unique() %>%
+  mutate(Metadata_broad_sample = Var1, Metadata_moa = Metadata_moa.x) %>%
+  select(-Var1, -Metadata_moa.x)
+
+metadata_dp <- metadata_dp.melt.median %>% mutate(Metadata_moa = str_to_lower(Metadata_moa))
+
+
+
+
+top.prec <- c(seq(from = 0.98, to = 0.997, by = 0.002))
+enrichment_top_conn <- Vectorize(enrichment_top_conn, vectorize.args = "top.perc")
+
+sm.median <- perpare_sm(sm = cr.median, metadata = metadata_cp)
+dp.sm.median <- perpare_sm(sm = dp.median, metadata = metadata_dp)
+
+
+median.res <- enrichment_top_conn(sm = sm.median, metadata = metadata_cp, top.perc = top.prec, not.same.batch = not.same.batch)
+median.res <- median.res[3,] %>% unlist %>% unname()
+
+dp.median.res <- enrichment_top_conn(sm = dp.sm.median, metadata = metadata_dp, top.perc = top.prec, not.same.batch = not.same.batch)
+
+dp.median.res <- dp.median.res[3,] %>% unlist %>% unname()
+
+D1 <- data.frame(top.prec = top.prec * 100, odds.ratio = median.res, Dataset = "CellProfiler")
+D2 <- data.frame(top.prec = top.prec * 100, odds.ratio = dp.median.res, Dataset = "Deep_CellProfiler")
+
+D <- rbind(D1, D2)
+D <- D %>% mutate(top.prec = 100 - top.prec)
+lvls <- c("CellProfiler", "Deep_CellProfiler")
+D <- D %>% mutate(method = factor(Dataset, levels = lvls))
+
+
+
+g <- ggplot(D, aes(x = top.prec, y = odds.ratio, color = Dataset)) +
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(limits = c(0, NA)) +
+  scale_x_continuous(breaks = 100 - rev(top.prec[seq(from = 1, to = length(top.prec), by = 2)] * 100), minor_breaks = 100 - rev(top.prec * 100)) +
+  ylab("Folds of enrichment") +
+  xlab("p") +
+  ggtitle("Folds of enrichment for top p% connections \n to have same MOAs/Pathways") +
+  theme_classic() +
+  theme(axis.text = element_text(size=20), text = element_text(size=15)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.title=element_blank())
+
+ggsave("R_evaluation_deepCP_CP_TAORF.png", g, width = 7, height = 5)
+print(g)
+
+```
+
